@@ -327,6 +327,42 @@ def generate_yaml_reports(dependency_analysis_map):
             versions_current_run_list.append(version_yaml_entry_current_run)
         # versions_current_run_list is already sorted by version due to sorted_versions_minimal_from_run
 
+        # 1. Determine Overall Compatibility for Each Version
+        for v_entry in versions_current_run_list:
+            v_entry['is_fully_compatible_16kb'] = (
+                v_entry.get('self_16kb_compatibility') is True and
+                v_entry.get('transitive_16kb_compatibility') is True
+            )
+
+        # 2. Identify the Current Version
+        current_version_16kb = None
+        if versions_current_run_list:
+            current_version_16kb = versions_current_run_list[-1]['version']
+
+        # 3. Determine the Oldest Compatible Version (16KB)
+        oldest_compatible_version_16kb = None
+        if versions_current_run_list:
+            for i, v_outer in enumerate(versions_current_run_list):
+                if v_outer.get('is_fully_compatible_16kb') is True:
+                    is_oldest_compatible_candidate = True
+                    # Check all subsequent versions
+                    for j in range(i + 1, len(versions_current_run_list)):
+                        v_inner = versions_current_run_list[j]
+                        if v_inner.get('is_fully_compatible_16kb') is not True:
+                            is_oldest_compatible_candidate = False
+                            break
+                    if is_oldest_compatible_candidate:
+                        oldest_compatible_version_16kb = v_outer['version']
+                        break 
+
+        # Prepare versions list for YAML output by removing the temporary key
+        versions_for_yaml_output = []
+        for v_entry in versions_current_run_list:
+            entry_copy = v_entry.copy()
+            entry_copy.pop('is_fully_compatible_16kb', None) # Remove temporary key
+            versions_for_yaml_output.append(entry_copy)
+
+
         final_yaml_data_to_dump = {}
         log_action_verb = "Generated" # Default to "Generated" for new files
 
@@ -353,6 +389,9 @@ def generate_yaml_reports(dependency_analysis_map):
                 existing_yaml_data['artifact_id'] = artifact_id_current
                 existing_yaml_data['project_url'] = project_url_current
                 existing_yaml_data['maven_repository'] = maven_repository_current
+                # Add new fields
+                existing_yaml_data['current_version_16kb'] = current_version_16kb
+                existing_yaml_data['oldest_compatible_version_16kb'] = oldest_compatible_version_16kb
 
                 # Merge versions
                 existing_versions_list = existing_yaml_data.get('versions', [])
@@ -362,7 +401,8 @@ def generate_yaml_reports(dependency_analysis_map):
                 
                 existing_versions_map = {v['version']: v for v in existing_versions_list}
 
-                for version_entry_current_run in versions_current_run_list:
+                # Use versions_for_yaml_output which does not have the temporary key
+                for version_entry_current_run in versions_for_yaml_output:
                     version_str_current = version_entry_current_run['version']
                     if version_str_current in existing_versions_map:
                         # Update existing version entry
@@ -388,7 +428,9 @@ def generate_yaml_reports(dependency_analysis_map):
                 'artifact_id': artifact_id_current,
                 'project_url': project_url_current,
                 'maven_repository': maven_repository_current,
-                'versions': versions_current_run_list # Already sorted
+                'current_version_16kb': current_version_16kb,
+                'oldest_compatible_version_16kb': oldest_compatible_version_16kb,
+                'versions': versions_for_yaml_output # Use versions_for_yaml_output
             }
             log_action_verb = "Created"
 
