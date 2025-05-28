@@ -70,6 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze Maven project dependencies for .so file alignment.")
     parser.add_argument("input_source", help="Path to the Maven pom.xml file OR a direct dependency string (e.g., group:artifact:version).")
     parser.add_argument("output_report_path", help="Path to save the JSON report (directory or full path).")
+    parser.add_argument("--download-dir", action="store", default=None, help="Optional. Path to a directory where dependencies will be downloaded. If provided, downloaded files will be kept.")
     args = parser.parse_args()
 
     initial_dependencies_list = []
@@ -129,8 +130,14 @@ def main():
     if output_directory:
         os.makedirs(output_directory, exist_ok=True)
 
-    temp_download_dir = tempfile.mkdtemp()
-    logging.info(f"Created temporary directory for downloads: {temp_download_dir}")
+    if args.download_dir:
+        temp_download_dir = args.download_dir
+        os.makedirs(temp_download_dir, exist_ok=True)
+        logging.info(f"Using specified download directory: {temp_download_dir}")
+    else:
+        temp_download_dir = tempfile.mkdtemp()
+        logging.info(f"Created temporary directory for downloads: {temp_download_dir}")
+
     so_extract_dir = os.path.join(temp_download_dir, "extracted_so_files")
     os.makedirs(so_extract_dir, exist_ok=True)
     logging.info(f"Created directory for extracted .so files: {so_extract_dir}")
@@ -149,16 +156,19 @@ def main():
         )
         logging.info(f"Total .so files extracted (for JSON flat list): {len(all_extracted_so_data_for_json_report)}")
     finally:
-        logging.info(f"Cleaning up temporary directory: {temp_download_dir}")
-        for root_path, dirs, files_in_dir in os.walk(temp_download_dir, topdown=False):
-            for name in files_in_dir:
-                try: os.remove(os.path.join(root_path, name))
-                except OSError as e: logging.error(f"Error removing file {os.path.join(root_path, name)}: {e}")
-            for name in dirs:
-                try: os.rmdir(os.path.join(root_path, name))
-                except OSError as e: logging.error(f"Error removing directory {os.path.join(root_path, name)}: {e}")
-        try: os.rmdir(temp_download_dir)
-        except OSError as e: logging.error(f"Error removing temporary directory {temp_download_dir}: {e}")
+        if not args.download_dir:
+            logging.info(f"Cleaning up temporary directory: {temp_download_dir}")
+            for root_path, dirs, files_in_dir in os.walk(temp_download_dir, topdown=False):
+                for name in files_in_dir:
+                    try: os.remove(os.path.join(root_path, name))
+                    except OSError as e: logging.error(f"Error removing file {os.path.join(root_path, name)}: {e}")
+                for name in dirs:
+                    try: os.rmdir(os.path.join(root_path, name))
+                    except OSError as e: logging.error(f"Error removing directory {os.path.join(root_path, name)}: {e}")
+            try: os.rmdir(temp_download_dir)
+            except OSError as e: logging.error(f"Error removing temporary directory {temp_download_dir}: {e}")
+        else:
+            logging.info(f"Skipping cleanup of user-specified download directory: {temp_download_dir}")
 
     json_so_files_analysis_list = []
     aligned_so_files_count = 0
@@ -219,24 +229,83 @@ def generate_yaml_reports(dependency_analysis_map):
     """Generates YAML reports for each G:A, with versions sorted."""
     logging.info("Generating YAML reports...")
     ga_to_versions_map = {}
+    # First, populate ga_to_versions_map with basic version info needed for sorting and G:A level data retrieval
     for gav_string, data in dependency_analysis_map.items():
         ga_tuple = (data['group'], data['artifact'])
         if ga_tuple not in ga_to_versions_map:
             ga_to_versions_map[ga_tuple] = []
-
-        version_entry = {
+        # Store enough info to retrieve the full data later, and for sorting
+        ga_to_versions_map[ga_tuple].append({
             'version': data['version'],
-            'direct_16kb_compatibility': data.get('direct_16kb_compatibility'),
-            'indirect_16kb_compatibility': data.get('indirect_16kb_compatibility')
-        }
-        ga_to_versions_map[ga_tuple].append(version_entry)
+            # direct_16kb_compatibility and indirect_16kb_compatibility will be fetched from the full_version_data later
+        })
 
-    for (group, artifact), version_data_list in ga_to_versions_map.items():
-        sorted_versions_data = sort_versions(version_data_list)
+    for (group, artifact), versions_list_minimal in ga_to_versions_map.items():
+        if not versions_list_minimal:
+            logging.warning(f"No version data found for G:A {group}:{artifact} during YAML generation. Skipping.")
+            continue
+
+        # Sort versions first
+        sorted_versions_minimal = sort_versions(versions_list_minimal)
+
+        # Fetch G:A level data using the first version (any version of this G:A would do)
+        # Ensure we use a GAV that definitely exists in dependency_analysis_map
+        first_version_str = sorted_versions_minimal[0]['version']
+        ga_level_gav = f"{group}:{artifact}:{first_version_str}"
+        ga_level_data = dependency_analysis_map.get(ga_level_gav)
+
+        if not ga_level_data:
+            logging.error(f"Could not retrieve G:A level data for {ga_level_gav}. Skipping YAML for this G:A.")
+            continue
+
+        project_url = ga_level_data.get('project_url')
+        maven_repo_name_raw = ga_level_data.get('maven_repository_name')
+        
+        maven_repository_display = "Other" # Default
+        if maven_repo_name_raw == "Google Maven":
+            maven_repository_display = "Google"
+        elif maven_repo_name_raw == "Maven Central":
+            maven_repository_display = "maven-central"
+        elif maven_repo_name_raw: # If it's some other URL or name
+            maven_repository_display = maven_repo_name_raw
+
+
+        processed_versions_data = []
+        for version_info_minimal in sorted_versions_minimal:
+            current_version_str = version_info_minimal['version']
+            gav_string = f"{group}:{artifact}:{current_version_str}"
+            full_version_data = dependency_analysis_map.get(gav_string)
+
+            if not full_version_data:
+                logging.warning(f"Missing full data for {gav_string} in dependency_analysis_map. Skipping this version in YAML.")
+                continue
+
+            self_contains_native_code = bool(full_version_data.get('direct_so_files'))
+            
+            transitive_contains_native_code = False
+            trans_deps_gavs = full_version_data.get('transitive_dependencies', [])
+            for trans_gav in trans_deps_gavs:
+                trans_dep_data = dependency_analysis_map.get(trans_gav)
+                if trans_dep_data and trans_dep_data.get('direct_so_files'):
+                    transitive_contains_native_code = True
+                    break
+            
+            version_yaml_entry = {
+                'version': current_version_str,
+                'self_contains_native_code': self_contains_native_code,
+                'self_16kb_compatibility': full_version_data.get('direct_16kb_compatibility'),
+                'transitive_contains_native_code': transitive_contains_native_code,
+                'transitive_16kb_compatibility': full_version_data.get('indirect_16kb_compatibility')
+            }
+            processed_versions_data.append(version_yaml_entry)
 
         yaml_data = {
+            'dependency_id': f"{group}:{artifact}",
+            'group_id': group,
             'artifact_id': artifact,
-            'versions': sorted_versions_data
+            'project_url': project_url,
+            'maven_repository': maven_repository_display,
+            'versions': processed_versions_data
         }
 
         group_path_elements = group.split('.')
@@ -444,11 +513,19 @@ def download_and_extract_dependencies_recursively(
                 'gav': current_gav_string, 'group': group_id, 'artifact': artifact_id, 'version': version,
                 'direct_so_files': [], 'transitive_dependencies': [],
                 'direct_16kb_compatibility': None, 'indirect_16kb_compatibility': None,
-                'downloaded_artifact_path': None, 'pom_download_url': None, 'artifact_download_url': None
+                'downloaded_artifact_path': None, 'pom_download_url': None, 'artifact_download_url': None,
+                'project_url': None, 'maven_repository_name': None
             }
         current_dep_map_entry = dependency_analysis_map[current_gav_string]
 
         repo_url = get_repository_url(dep_info, google_maven_regex_str) # google_maven_regex_str is now the hardcoded one
+        if "maven.google.com" in repo_url:
+            current_dep_map_entry['maven_repository_name'] = "Google Maven"
+        elif "repo.maven.apache.org" in repo_url:
+            current_dep_map_entry['maven_repository_name'] = "Maven Central"
+        else:
+            current_dep_map_entry['maven_repository_name'] = repo_url
+
         pom_url = construct_artifact_url(dep_info, repo_url, artifact_type="pom")
         current_dep_map_entry['pom_download_url'] = pom_url
 
@@ -461,7 +538,30 @@ def download_and_extract_dependencies_recursively(
 
         if downloaded_pom_path:
             logging.info(f"Successfully downloaded POM: {pom_filename} from {pom_url}")
-            transitive_deps_from_pom = parse_maven_file(downloaded_pom_path)
+            try:
+                tree = ET.parse(downloaded_pom_path)
+                root = tree.getroot()
+                namespace = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+
+                project_url_element = root.find(f"{namespace}url") # Note: No .// for direct child
+                project_url = project_url_element.text.strip() if project_url_element is not None and project_url_element.text else None
+                if not project_url:
+                    scm_node = root.find(f"{namespace}scm") # Note: No .// for direct child
+                    if scm_node is not None:
+                        scm_url_element = scm_node.find(f"{namespace}url") # Note: No .// for direct child
+                        project_url = scm_url_element.text.strip() if scm_url_element is not None and scm_url_element.text else None
+                current_dep_map_entry['project_url'] = project_url
+                if project_url:
+                    logging.info(f"Extracted project URL for {current_gav_string}: {project_url}")
+                else:
+                    logging.info(f"No project URL found in POM for {current_gav_string}")
+
+            except ET.ParseError:
+                logging.warning(f"Could not parse downloaded POM {downloaded_pom_path} to extract project URL.")
+            except Exception as e_url_extract:
+                logging.error(f"Unexpected error extracting project URL from {downloaded_pom_path}: {e_url_extract}", exc_info=True)
+
+            transitive_deps_from_pom = parse_maven_file(downloaded_pom_path) # parse_maven_file also parses, but we need project_url before transitive
             for trans_dep_info in transitive_deps_from_pom:
                 trans_g = trans_dep_info.get('groupId')
                 trans_a = trans_dep_info.get('artifactId')
