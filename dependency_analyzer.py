@@ -41,7 +41,7 @@ from packaging.version import parse as parse_version # For robust version sortin
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Hardcoded regex for Google Maven dependencies
-GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*|com\\.android\\..*)"
+GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*|com\\.android\\..*|android\\.arch\\..*)"
 
 FAILED_DOWNLOADS_FILE = "failed_downloads.txt"
 
