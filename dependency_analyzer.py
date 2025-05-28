@@ -653,6 +653,7 @@ def download_and_extract_dependencies_recursively(
                 trans_v = trans_dep_info.get('version')
                 if trans_g and trans_a and trans_v:
                     trans_gav_string = f"{trans_g}:{trans_a}:{trans_v}"
+                    logging.info(f"Artifact '{current_gav_string}' has a direct dependency: '{trans_gav_string}'")
                     current_dep_map_entry['transitive_dependencies'].append(trans_gav_string)
                     is_in_queue = any(
                         f"{d.get('groupId')}:{d.get('artifactId')}:{d.get('version')}" == trans_gav_string

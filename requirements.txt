@@ -1,4 +1,4 @@
-requests
-python-magic
-PyYAML
-packaging
+requests==2.32.3
+python-magic==0.4.27
+PyYAML==6.0.2
+packaging==25.0
