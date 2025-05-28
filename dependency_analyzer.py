@@ -54,10 +54,11 @@ def log_failed_download(gav_string):
     except IOError as e:
         logging.error(f"Could not write to {FAILED_DOWNLOADS_FILE}: {e}")
 
-def parse_maven_file(file_path):
+def parse_maven_file(file_path): # Removed skipped_dependencies_eval_list from parameters
     """Parses a Maven POM file to extract dependencies."""
     logging.info(f"Parsing Maven file: {file_path}")
     dependencies = []
+    locally_skipped_dependencies = [] # Initialize local list
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -71,17 +72,23 @@ def parse_maven_file(file_path):
             group_id = group_id_element.text if group_id_element is not None else None
             artifact_id = artifact_id_element.text if artifact_id_element is not None else None
             version = version_element.text if version_element is not None else None
+
+            if version is not None and '$' in version:
+                logging.warning(f"Skipping dependency {group_id}:{artifact_id}:{version} (from POM {file_path}) due to evaluated expression in version.")
+                locally_skipped_dependencies.append({"groupId": group_id, "artifactId": artifact_id, "version": version}) # Append to local list
+                continue
+
             if group_id and artifact_id:
                 dependencies.append({"groupId": group_id, "artifactId": artifact_id, "version": version})
             else:
                 logging.warning(f"Skipping dependency with missing groupId or artifactId in {file_path}")
     except ET.ParseError:
         logging.error(f"Error parsing XML file: {file_path}", exc_info=True)
-        return []
+        return [], locally_skipped_dependencies
     except Exception:
         logging.error(f"An unexpected error occurred while parsing {file_path}", exc_info=True)
-        return []
-    return dependencies
+        return [], locally_skipped_dependencies
+    return dependencies, locally_skipped_dependencies
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze Maven project dependencies for .so file alignment.")
@@ -91,10 +98,14 @@ def main():
     args = parser.parse_args()
 
     initial_dependencies_list = []
+    skipped_dependencies_eval_list = [] # This is the global list for aggregation
 
     if os.path.isfile(args.input_source) and args.input_source.lower().endswith("pom.xml"):
         logging.info(f"Input source identified as POM file: {args.input_source}")
-        initial_dependencies_list = parse_maven_file(args.input_source)
+        # parse_maven_file now returns its own local list of skipped dependencies
+        initial_dependencies_list_temp, locally_skipped = parse_maven_file(args.input_source)
+        initial_dependencies_list.extend(initial_dependencies_list_temp)
+        skipped_dependencies_eval_list.extend(locally_skipped) # Aggregate
         if not isinstance(initial_dependencies_list, list):
             initial_dependencies_list = []
     elif ':' in args.input_source: # Basic check for GAV string
@@ -102,8 +113,13 @@ def main():
         if len(gav_parts) == 3:
             group_id, artifact_id, version = gav_parts[0], gav_parts[1], gav_parts[2]
             if group_id and artifact_id and version:
-                logging.info(f"Input source identified as direct dependency string: {args.input_source}")
-                initial_dependencies_list = [{"groupId": group_id, "artifactId": artifact_id, "version": version}]
+                if '$' in version:
+                    logging.warning(f"Skipping direct dependency {args.input_source} due to evaluated expression in version.")
+                    skipped_dependencies_eval_list.append({"groupId": group_id, "artifactId": artifact_id, "version": version})
+                    # initial_dependencies_list remains empty or unchanged if others were added before
+                else:
+                    logging.info(f"Input source identified as direct dependency string: {args.input_source}")
+                    initial_dependencies_list = [{"groupId": group_id, "artifactId": artifact_id, "version": version}]
             else:
                 logging.error(f"Invalid GAV string format: '{args.input_source}'. Expected 'groupId:artifactId:version' with non-empty parts.")
                 sys.exit(1)
@@ -161,6 +177,7 @@ def main():
     processed_gav_strings = set()
     dependency_analysis_map = {}
     all_extracted_so_data_for_json_report = []
+    # skipped_dependencies_eval_list is already initialized and potentially populated by main POM parsing
     try:
         use_structured_paths = bool(args.download_dir)
         download_and_extract_dependencies_recursively(
@@ -171,7 +188,8 @@ def main():
             processed_gav_strings=processed_gav_strings,
             dependency_analysis_map=dependency_analysis_map,
             all_extracted_so_data_for_json_report=all_extracted_so_data_for_json_report,
-            use_structured_download_paths=use_structured_paths # New argument
+            use_structured_download_paths=use_structured_paths, # New argument
+            skipped_dependencies_eval_list=skipped_dependencies_eval_list # Pass down the list
         )
         logging.info(f"Total .so files extracted (for JSON flat list): {len(all_extracted_so_data_for_json_report)}")
     finally:
@@ -222,13 +240,15 @@ def main():
         "total_so_files_found": len(json_so_files_analysis_list),
         "aligned_so_files_count": aligned_so_files_count,
         "unaligned_so_files_count": unaligned_so_files_count,
-        "error_alignment_check_count": error_alignment_check_count
+        "error_alignment_check_count": error_alignment_check_count,
+        "skipped_dependencies_with_evaluated_versions": len(skipped_dependencies_eval_list)
     }
     final_report_data = {
         "summary": report_summary,
         "initial_dependencies": initial_dependencies_list,
         "resolved_artifacts": json_resolved_artifacts_list,
-        "so_files_analysis": json_so_files_analysis_list
+        "so_files_analysis": json_so_files_analysis_list,
+        "skipped_dependencies_evaluations": skipped_dependencies_eval_list
     }
     with open(output_json_final_path, 'w') as f:
         json.dump(final_report_data, f, indent=4, default=str)
@@ -607,7 +627,8 @@ def check_elf_alignment(so_file_path):
 def download_and_extract_dependencies_recursively(
     initial_dependencies, temp_dir, so_extract_dir, google_maven_regex_str,
     processed_gav_strings, dependency_analysis_map, all_extracted_so_data_for_json_report,
-    use_structured_download_paths: bool
+    use_structured_download_paths: bool,
+    skipped_dependencies_eval_list # Added new parameter
 ):
     dependencies_to_process_queue = list(initial_dependencies)
 
@@ -691,8 +712,11 @@ def download_and_extract_dependencies_recursively(
             except Exception as e_url_extract:
                 logging.error(f"Unexpected error extracting project URL from {downloaded_pom_path}: {e_url_extract}", exc_info=True)
 
-            transitive_deps_from_pom = parse_maven_file(downloaded_pom_path) # parse_maven_file also parses, but we need project_url before transitive
-            for trans_dep_info in transitive_deps_from_pom:
+            # parse_maven_file now returns its own local list of skipped dependencies
+            transitive_deps_from_pom_temp, locally_skipped_transitive = parse_maven_file(downloaded_pom_path)
+            # Aggregate locally_skipped_transitive into the main skipped_dependencies_eval_list
+            skipped_dependencies_eval_list.extend(locally_skipped_transitive)
+            for trans_dep_info in transitive_deps_from_pom_temp: # Process only valid dependencies
                 trans_g = trans_dep_info.get('groupId')
                 trans_a = trans_dep_info.get('artifactId')
                 trans_v = trans_dep_info.get('version')
