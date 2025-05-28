@@ -160,6 +160,7 @@ def main():
     dependency_analysis_map = {}
     all_extracted_so_data_for_json_report = []
     try:
+        use_structured_paths = bool(args.download_dir)
         download_and_extract_dependencies_recursively(
             initial_dependencies=initial_dependencies_list,
             temp_dir=temp_download_dir,
@@ -167,7 +168,8 @@ def main():
             google_maven_regex_str=GOOGLE_MAVEN_DEFAULT_REGEX, # Use hardcoded regex
             processed_gav_strings=processed_gav_strings,
             dependency_analysis_map=dependency_analysis_map,
-            all_extracted_so_data_for_json_report=all_extracted_so_data_for_json_report
+            all_extracted_so_data_for_json_report=all_extracted_so_data_for_json_report,
+            use_structured_download_paths=use_structured_paths # New argument
         )
         logging.info(f"Total .so files extracted (for JSON flat list): {len(all_extracted_so_data_for_json_report)}")
     finally:
@@ -559,7 +561,8 @@ def check_elf_alignment(so_file_path):
 
 def download_and_extract_dependencies_recursively(
     initial_dependencies, temp_dir, so_extract_dir, google_maven_regex_str,
-    processed_gav_strings, dependency_analysis_map, all_extracted_so_data_for_json_report
+    processed_gav_strings, dependency_analysis_map, all_extracted_so_data_for_json_report,
+    use_structured_download_paths: bool
 ):
     dependencies_to_process_queue = list(initial_dependencies)
 
@@ -608,11 +611,18 @@ def download_and_extract_dependencies_recursively(
             logging.error(f"Could not construct POM URL for {current_gav_string}. Skipping.")
             continue
 
-        pom_filename = f"{artifact_id}-{version}.pom"
-        downloaded_pom_path = download_artifact(pom_url, temp_dir, pom_filename)
+        pom_filename_to_use = f"{artifact_id}-{version}.pom"
+        if use_structured_download_paths:
+            group_path = group_id.replace('.', os.sep)
+            artifact_specific_download_dir = os.path.join(temp_dir, group_path, artifact_id, version)
+            effective_pom_download_dir = artifact_specific_download_dir
+        else:
+            effective_pom_download_dir = temp_dir
+        
+        downloaded_pom_path = download_artifact(pom_url, effective_pom_download_dir, pom_filename_to_use)
 
         if downloaded_pom_path:
-            logging.info(f"Successfully downloaded POM: {pom_filename} from {pom_url}")
+            logging.info(f"Successfully downloaded POM: {pom_filename_to_use} from {pom_url}")
             try:
                 tree = ET.parse(downloaded_pom_path)
                 root = tree.getroot()
@@ -687,12 +697,19 @@ def download_and_extract_dependencies_recursively(
             logging.error(f"Could not construct URL for main artifact of {current_gav_string} (type: {artifact_type_to_download}). Skipping artifact download.")
             continue
 
-        main_artifact_filename = f"{artifact_id}-{version}.{artifact_type_to_download}"
-        downloaded_main_artifact_path = download_artifact(main_artifact_url, temp_dir, main_artifact_filename)
+        main_artifact_filename_to_use = f"{artifact_id}-{version}.{artifact_type_to_download}"
+        if use_structured_download_paths:
+            group_path = group_id.replace('.', os.sep) # Ensure defined, might be redundant if POM was downloaded
+            artifact_specific_download_dir = os.path.join(temp_dir, group_path, artifact_id, version) # Ensure defined
+            effective_artifact_download_dir = artifact_specific_download_dir
+        else:
+            effective_artifact_download_dir = temp_dir
+
+        downloaded_main_artifact_path = download_artifact(main_artifact_url, effective_artifact_download_dir, main_artifact_filename_to_use)
 
         if downloaded_main_artifact_path:
             current_dep_map_entry['downloaded_artifact_path'] = downloaded_main_artifact_path
-            logging.info(f"Successfully downloaded main artifact: {main_artifact_filename} from {main_artifact_url}")
+            logging.info(f"Successfully downloaded main artifact: {main_artifact_filename_to_use} from {main_artifact_url}")
             so_files_metadata_list = extract_so_files_from_archive(downloaded_main_artifact_path, so_extract_dir, dep_info)
             current_dep_map_entry['direct_so_files'].extend(so_files_metadata_list)
             if so_files_metadata_list:
@@ -709,7 +726,8 @@ def download_and_extract_dependencies_recursively(
                 fallback_jar_url = construct_artifact_url(dep_info, repo_url, artifact_type="jar")
                 current_dep_map_entry['artifact_download_url'] += f", FallbackAttemptURL: {fallback_jar_url}"
                 fallback_jar_filename = f"{artifact_id}-{version}.jar"
-                downloaded_fallback_jar_path = download_artifact(fallback_jar_url, temp_dir, fallback_jar_filename)
+                # effective_artifact_download_dir is already defined from the main artifact attempt
+                downloaded_fallback_jar_path = download_artifact(fallback_jar_url, effective_artifact_download_dir, fallback_jar_filename)
                 if downloaded_fallback_jar_path:
                     current_dep_map_entry['downloaded_artifact_path'] = downloaded_fallback_jar_path
                     logging.info(f"Successfully downloaded fallback JAR: {fallback_jar_filename} from {fallback_jar_url}")
