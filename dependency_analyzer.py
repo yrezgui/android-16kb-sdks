@@ -16,6 +16,10 @@ python dependency_analyzer.py path/to/your/project/pom.xml path/to/output_report
 
 # For a single Maven dependency:
 python dependency_analyzer.py "com.github.barteksc:pdfium-android:1.9.0" path/to/output_report.json
+
+# Specifying a custom download directory for dependencies:
+python dependency_analyzer.py path/to/your/project/pom.xml path/to/output_report.json --download-dir path/to/your/custom/download_folder
+python dependency_analyzer.py "com.github.barteksc:pdfium-android:1.9.0" path/to/output_report.json --download-dir path/to/your/custom/download_folder
 """
 
 import argparse
@@ -37,7 +41,18 @@ from packaging.version import parse as parse_version # For robust version sortin
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Hardcoded regex for Google Maven dependencies
-GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*)"
+GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*|com\\.android\\..*|android\\.arch\\..*)"
+
+FAILED_DOWNLOADS_FILE = "failed_downloads.txt"
+
+def log_failed_download(gav_string):
+    """Appends a GAV string for a failed download to a text file."""
+    try:
+        with open(FAILED_DOWNLOADS_FILE, 'a') as f:
+            f.write(gav_string + '\n')
+        logging.info(f"Logged failed download for {gav_string} to {FAILED_DOWNLOADS_FILE}")
+    except IOError as e:
+        logging.error(f"Could not write to {FAILED_DOWNLOADS_FILE}: {e}")
 
 def parse_maven_file(file_path):
     """Parses a Maven POM file to extract dependencies."""
@@ -70,6 +85,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze Maven project dependencies for .so file alignment.")
     parser.add_argument("input_source", help="Path to the Maven pom.xml file OR a direct dependency string (e.g., group:artifact:version).")
     parser.add_argument("output_report_path", help="Path to save the JSON report (directory or full path).")
+    parser.add_argument("--download-dir", action="store", default=None, help="Optional. Path to a directory where dependencies will be downloaded. If provided, downloaded files will be kept.")
     args = parser.parse_args()
 
     initial_dependencies_list = []
@@ -129,8 +145,14 @@ def main():
     if output_directory:
         os.makedirs(output_directory, exist_ok=True)
 
-    temp_download_dir = tempfile.mkdtemp()
-    logging.info(f"Created temporary directory for downloads: {temp_download_dir}")
+    if args.download_dir:
+        temp_download_dir = args.download_dir
+        os.makedirs(temp_download_dir, exist_ok=True)
+        logging.info(f"Using specified download directory: {temp_download_dir}")
+    else:
+        temp_download_dir = tempfile.mkdtemp()
+        logging.info(f"Created temporary directory for downloads: {temp_download_dir}")
+
     so_extract_dir = os.path.join(temp_download_dir, "extracted_so_files")
     os.makedirs(so_extract_dir, exist_ok=True)
     logging.info(f"Created directory for extracted .so files: {so_extract_dir}")
@@ -138,6 +160,7 @@ def main():
     dependency_analysis_map = {}
     all_extracted_so_data_for_json_report = []
     try:
+        use_structured_paths = bool(args.download_dir)
         download_and_extract_dependencies_recursively(
             initial_dependencies=initial_dependencies_list,
             temp_dir=temp_download_dir,
@@ -145,20 +168,24 @@ def main():
             google_maven_regex_str=GOOGLE_MAVEN_DEFAULT_REGEX, # Use hardcoded regex
             processed_gav_strings=processed_gav_strings,
             dependency_analysis_map=dependency_analysis_map,
-            all_extracted_so_data_for_json_report=all_extracted_so_data_for_json_report
+            all_extracted_so_data_for_json_report=all_extracted_so_data_for_json_report,
+            use_structured_download_paths=use_structured_paths # New argument
         )
         logging.info(f"Total .so files extracted (for JSON flat list): {len(all_extracted_so_data_for_json_report)}")
     finally:
-        logging.info(f"Cleaning up temporary directory: {temp_download_dir}")
-        for root_path, dirs, files_in_dir in os.walk(temp_download_dir, topdown=False):
-            for name in files_in_dir:
-                try: os.remove(os.path.join(root_path, name))
-                except OSError as e: logging.error(f"Error removing file {os.path.join(root_path, name)}: {e}")
-            for name in dirs:
-                try: os.rmdir(os.path.join(root_path, name))
-                except OSError as e: logging.error(f"Error removing directory {os.path.join(root_path, name)}: {e}")
-        try: os.rmdir(temp_download_dir)
-        except OSError as e: logging.error(f"Error removing temporary directory {temp_download_dir}: {e}")
+        if not args.download_dir:
+            logging.info(f"Cleaning up temporary directory: {temp_download_dir}")
+            for root_path, dirs, files_in_dir in os.walk(temp_download_dir, topdown=False):
+                for name in files_in_dir:
+                    try: os.remove(os.path.join(root_path, name))
+                    except OSError as e: logging.error(f"Error removing file {os.path.join(root_path, name)}: {e}")
+                for name in dirs:
+                    try: os.rmdir(os.path.join(root_path, name))
+                    except OSError as e: logging.error(f"Error removing directory {os.path.join(root_path, name)}: {e}")
+            try: os.rmdir(temp_download_dir)
+            except OSError as e: logging.error(f"Error removing temporary directory {temp_download_dir}: {e}")
+        else:
+            logging.info(f"Skipping cleanup of user-specified download directory: {temp_download_dir}")
 
     json_so_files_analysis_list = []
     aligned_so_files_count = 0
@@ -219,39 +246,158 @@ def generate_yaml_reports(dependency_analysis_map):
     """Generates YAML reports for each G:A, with versions sorted."""
     logging.info("Generating YAML reports...")
     ga_to_versions_map = {}
+    # First, populate ga_to_versions_map with basic version info needed for sorting and G:A level data retrieval
     for gav_string, data in dependency_analysis_map.items():
         ga_tuple = (data['group'], data['artifact'])
         if ga_tuple not in ga_to_versions_map:
             ga_to_versions_map[ga_tuple] = []
-
-        version_entry = {
+        # Store enough info to retrieve the full data later, and for sorting
+        ga_to_versions_map[ga_tuple].append({
             'version': data['version'],
-            'direct_16kb_compatibility': data.get('direct_16kb_compatibility'),
-            'indirect_16kb_compatibility': data.get('indirect_16kb_compatibility')
-        }
-        ga_to_versions_map[ga_tuple].append(version_entry)
+            # direct_16kb_compatibility and indirect_16kb_compatibility will be fetched from the full_version_data later
+        })
 
-    for (group, artifact), version_data_list in ga_to_versions_map.items():
-        sorted_versions_data = sort_versions(version_data_list)
+    for (group, artifact), version_data_list_from_run_minimal in ga_to_versions_map.items():
+        if not version_data_list_from_run_minimal:
+            logging.warning(f"No version data found for G:A {group}:{artifact} during YAML generation. Skipping.")
+            continue
 
-        yaml_data = {
-            'artifact_id': artifact,
-            'versions': sorted_versions_data
-        }
-
+        # Determine YAML file path
         group_path_elements = group.split('.')
         sanitized_artifact_filename = artifact.replace(':', '_') + ".yml"
         yaml_file_path_elements = ['_data'] + group_path_elements + [sanitized_artifact_filename]
         yaml_file_path = os.path.join(*yaml_file_path_elements)
+        
+        # Prepare G:A level data from current run
+        # Fetch using the first version from the minimal list to access dependency_analysis_map
+        first_version_str_for_ga_info = version_data_list_from_run_minimal[0]['version']
+        ga_level_gav_for_info = f"{group}:{artifact}:{first_version_str_for_ga_info}"
+        ga_level_data_from_run = dependency_analysis_map.get(ga_level_gav_for_info)
+
+        if not ga_level_data_from_run:
+            logging.error(f"Could not retrieve G:A level data for {ga_level_gav_for_info} from current run. Skipping YAML for this G:A.")
+            continue
+            
+        dependency_id_current = f"{group}:{artifact}"
+        group_id_current = group
+        artifact_id_current = artifact
+        project_url_current = ga_level_data_from_run.get('project_url')
+        maven_repo_name_raw_current = ga_level_data_from_run.get('maven_repository_name')
+        
+        maven_repository_current = "Other" # Default
+        if maven_repo_name_raw_current == "Google Maven":
+            maven_repository_current = "Google"
+        elif maven_repo_name_raw_current == "Maven Central":
+            maven_repository_current = "maven-central"
+        elif maven_repo_name_raw_current:
+            maven_repository_current = maven_repo_name_raw_current
+
+        # Prepare versions_current_run_list (fully populated and sorted)
+        versions_current_run_list = []
+        # Sort the minimal list first to process in order, though final sort happens after merge
+        sorted_versions_minimal_from_run = sort_versions(version_data_list_from_run_minimal)
+
+        for version_info_minimal in sorted_versions_minimal_from_run:
+            current_version_str = version_info_minimal['version']
+            gav_string_current_run = f"{group}:{artifact}:{current_version_str}"
+            full_version_data_current_run = dependency_analysis_map.get(gav_string_current_run)
+
+            if not full_version_data_current_run:
+                logging.warning(f"Missing full data for {gav_string_current_run} in dependency_analysis_map (current run). Skipping this version in YAML.")
+                continue
+
+            self_contains_native_code = bool(full_version_data_current_run.get('direct_so_files'))
+            transitive_contains_native_code = False
+            trans_deps_gavs = full_version_data_current_run.get('transitive_dependencies', [])
+            for trans_gav in trans_deps_gavs:
+                trans_dep_data = dependency_analysis_map.get(trans_gav)
+                if trans_dep_data and trans_dep_data.get('direct_so_files'):
+                    transitive_contains_native_code = True
+                    break
+            
+            version_yaml_entry_current_run = {
+                'version': current_version_str,
+                'self_contains_native_code': self_contains_native_code,
+                'self_16kb_compatibility': full_version_data_current_run.get('direct_16kb_compatibility'),
+                'transitive_contains_native_code': transitive_contains_native_code,
+                'transitive_16kb_compatibility': full_version_data_current_run.get('indirect_16kb_compatibility')
+            }
+            versions_current_run_list.append(version_yaml_entry_current_run)
+        # versions_current_run_list is already sorted by version due to sorted_versions_minimal_from_run
+
+        final_yaml_data_to_dump = {}
+        log_action_verb = "Generated" # Default to "Generated" for new files
+
+        if os.path.exists(yaml_file_path):
+            logging.info(f"File {yaml_file_path} exists. Attempting merge.")
+            existing_yaml_data = None
+            try:
+                with open(yaml_file_path, 'r') as f:
+                    existing_yaml_data = yaml.safe_load(f)
+                if not isinstance(existing_yaml_data, dict): # Handle empty or malformed file
+                    logging.warning(f"Existing YAML file {yaml_file_path} is malformed or empty. Treating as new file.")
+                    existing_yaml_data = None # Reset to ensure it's treated as a new file scenario
+            except yaml.YAMLError as e_yaml:
+                logging.warning(f"Error loading existing YAML file {yaml_file_path}: {e_yaml}. Treating as new file.")
+                existing_yaml_data = None # Reset
+            except FileNotFoundError: # Should not happen due to os.path.exists, but good practice
+                logging.warning(f"Existing YAML file {yaml_file_path} not found despite os.path.exists. Treating as new file.")
+                existing_yaml_data = None # Reset
+            
+            if existing_yaml_data:
+                # Update top-level fields
+                existing_yaml_data['dependency_id'] = dependency_id_current
+                existing_yaml_data['group_id'] = group_id_current
+                existing_yaml_data['artifact_id'] = artifact_id_current
+                existing_yaml_data['project_url'] = project_url_current
+                existing_yaml_data['maven_repository'] = maven_repository_current
+
+                # Merge versions
+                existing_versions_list = existing_yaml_data.get('versions', [])
+                if not isinstance(existing_versions_list, list): # Ensure it's a list
+                    logging.warning(f"Versions in existing YAML {yaml_file_path} is not a list. Overwriting with current run's versions.")
+                    existing_versions_list = []
+                
+                existing_versions_map = {v['version']: v for v in existing_versions_list}
+
+                for version_entry_current_run in versions_current_run_list:
+                    version_str_current = version_entry_current_run['version']
+                    if version_str_current in existing_versions_map:
+                        # Update existing version entry
+                        existing_versions_map[version_str_current].update(version_entry_current_run)
+                    else:
+                        # Add new version entry
+                        existing_versions_list.append(version_entry_current_run)
+                
+                existing_yaml_data['versions'] = sort_versions(existing_versions_list)
+                final_yaml_data_to_dump = existing_yaml_data
+                log_action_verb = "Updated"
+            else: # Existing file was unreadable or malformed
+                logging.info(f"File {yaml_file_path} was unreadable or malformed. Creating new file.")
+                # Fall through to "else" block logic by not setting final_yaml_data_to_dump here
+                pass # Explicitly do nothing to fall through
+
+        # This block handles both "file does not exist" and "file existed but was unreadable/malformed"
+        if not final_yaml_data_to_dump: # If it's still empty (new file or error loading existing)
+            logging.info(f"File {yaml_file_path} does not exist or was unreadable. Creating new file.")
+            final_yaml_data_to_dump = {
+                'dependency_id': dependency_id_current,
+                'group_id': group_id_current,
+                'artifact_id': artifact_id_current,
+                'project_url': project_url_current,
+                'maven_repository': maven_repository_current,
+                'versions': versions_current_run_list # Already sorted
+            }
+            log_action_verb = "Created"
 
         try:
             yaml_output_dir = os.path.dirname(yaml_file_path)
             os.makedirs(yaml_output_dir, exist_ok=True)
             with open(yaml_file_path, 'w') as f:
-                yaml.dump(yaml_data, f, sort_keys=False, default_flow_style=False, indent=2)
-            logging.info(f"Generated YAML report: {yaml_file_path}")
+                yaml.dump(final_yaml_data_to_dump, f, sort_keys=False, default_flow_style=False, indent=2)
+            logging.info(f"{log_action_verb} YAML report: {yaml_file_path}")
         except Exception as e:
-            logging.error(f"Error generating YAML report {yaml_file_path}: {e}", exc_info=True)
+            logging.error(f"Error writing YAML report {yaml_file_path}: {e}", exc_info=True)
 
 
 def calculate_direct_compatibility(gav_entry):
@@ -415,7 +561,8 @@ def check_elf_alignment(so_file_path):
 
 def download_and_extract_dependencies_recursively(
     initial_dependencies, temp_dir, so_extract_dir, google_maven_regex_str,
-    processed_gav_strings, dependency_analysis_map, all_extracted_so_data_for_json_report
+    processed_gav_strings, dependency_analysis_map, all_extracted_so_data_for_json_report,
+    use_structured_download_paths: bool
 ):
     dependencies_to_process_queue = list(initial_dependencies)
 
@@ -444,11 +591,19 @@ def download_and_extract_dependencies_recursively(
                 'gav': current_gav_string, 'group': group_id, 'artifact': artifact_id, 'version': version,
                 'direct_so_files': [], 'transitive_dependencies': [],
                 'direct_16kb_compatibility': None, 'indirect_16kb_compatibility': None,
-                'downloaded_artifact_path': None, 'pom_download_url': None, 'artifact_download_url': None
+                'downloaded_artifact_path': None, 'pom_download_url': None, 'artifact_download_url': None,
+                'project_url': None, 'maven_repository_name': None
             }
         current_dep_map_entry = dependency_analysis_map[current_gav_string]
 
         repo_url = get_repository_url(dep_info, google_maven_regex_str) # google_maven_regex_str is now the hardcoded one
+        if "maven.google.com" in repo_url:
+            current_dep_map_entry['maven_repository_name'] = "Google Maven"
+        elif "repo.maven.apache.org" in repo_url:
+            current_dep_map_entry['maven_repository_name'] = "Maven Central"
+        else:
+            current_dep_map_entry['maven_repository_name'] = repo_url
+
         pom_url = construct_artifact_url(dep_info, repo_url, artifact_type="pom")
         current_dep_map_entry['pom_download_url'] = pom_url
 
@@ -456,12 +611,42 @@ def download_and_extract_dependencies_recursively(
             logging.error(f"Could not construct POM URL for {current_gav_string}. Skipping.")
             continue
 
-        pom_filename = f"{artifact_id}-{version}.pom"
-        downloaded_pom_path = download_artifact(pom_url, temp_dir, pom_filename)
+        pom_filename_to_use = f"{artifact_id}-{version}.pom"
+        if use_structured_download_paths:
+            group_path = group_id.replace('.', os.sep)
+            artifact_specific_download_dir = os.path.join(temp_dir, group_path, artifact_id, version)
+            effective_pom_download_dir = artifact_specific_download_dir
+        else:
+            effective_pom_download_dir = temp_dir
+        
+        downloaded_pom_path = download_artifact(pom_url, effective_pom_download_dir, pom_filename_to_use)
 
         if downloaded_pom_path:
-            logging.info(f"Successfully downloaded POM: {pom_filename} from {pom_url}")
-            transitive_deps_from_pom = parse_maven_file(downloaded_pom_path)
+            logging.info(f"Successfully downloaded POM: {pom_filename_to_use} from {pom_url}")
+            try:
+                tree = ET.parse(downloaded_pom_path)
+                root = tree.getroot()
+                namespace = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+
+                project_url_element = root.find(f"{namespace}url") # Note: No .// for direct child
+                project_url = project_url_element.text.strip() if project_url_element is not None and project_url_element.text else None
+                if not project_url:
+                    scm_node = root.find(f"{namespace}scm") # Note: No .// for direct child
+                    if scm_node is not None:
+                        scm_url_element = scm_node.find(f"{namespace}url") # Note: No .// for direct child
+                        project_url = scm_url_element.text.strip() if scm_url_element is not None and scm_url_element.text else None
+                current_dep_map_entry['project_url'] = project_url
+                if project_url:
+                    logging.info(f"Extracted project URL for {current_gav_string}: {project_url}")
+                else:
+                    logging.info(f"No project URL found in POM for {current_gav_string}")
+
+            except ET.ParseError:
+                logging.warning(f"Could not parse downloaded POM {downloaded_pom_path} to extract project URL.")
+            except Exception as e_url_extract:
+                logging.error(f"Unexpected error extracting project URL from {downloaded_pom_path}: {e_url_extract}", exc_info=True)
+
+            transitive_deps_from_pom = parse_maven_file(downloaded_pom_path) # parse_maven_file also parses, but we need project_url before transitive
             for trans_dep_info in transitive_deps_from_pom:
                 trans_g = trans_dep_info.get('groupId')
                 trans_a = trans_dep_info.get('artifactId')
@@ -480,6 +665,7 @@ def download_and_extract_dependencies_recursively(
             logging.info(f"Found {len(current_dep_map_entry['transitive_dependencies'])} transitive dependencies for {current_gav_string}")
         else:
             logging.warning(f"Failed to download POM for {current_gav_string} from {pom_url}. Transitive dependencies will not be processed for this specific artifact's POM.")
+            log_failed_download(current_gav_string + " (POM)") # Log POM download failure
 
         artifact_type_from_pom = "jar"
         if downloaded_pom_path:
@@ -511,24 +697,37 @@ def download_and_extract_dependencies_recursively(
             logging.error(f"Could not construct URL for main artifact of {current_gav_string} (type: {artifact_type_to_download}). Skipping artifact download.")
             continue
 
-        main_artifact_filename = f"{artifact_id}-{version}.{artifact_type_to_download}"
-        downloaded_main_artifact_path = download_artifact(main_artifact_url, temp_dir, main_artifact_filename)
+        main_artifact_filename_to_use = f"{artifact_id}-{version}.{artifact_type_to_download}"
+        if use_structured_download_paths:
+            group_path = group_id.replace('.', os.sep) # Ensure defined, might be redundant if POM was downloaded
+            artifact_specific_download_dir = os.path.join(temp_dir, group_path, artifact_id, version) # Ensure defined
+            effective_artifact_download_dir = artifact_specific_download_dir
+        else:
+            effective_artifact_download_dir = temp_dir
+
+        downloaded_main_artifact_path = download_artifact(main_artifact_url, effective_artifact_download_dir, main_artifact_filename_to_use)
 
         if downloaded_main_artifact_path:
             current_dep_map_entry['downloaded_artifact_path'] = downloaded_main_artifact_path
-            logging.info(f"Successfully downloaded main artifact: {main_artifact_filename} from {main_artifact_url}")
+            logging.info(f"Successfully downloaded main artifact: {main_artifact_filename_to_use} from {main_artifact_url}")
             so_files_metadata_list = extract_so_files_from_archive(downloaded_main_artifact_path, so_extract_dir, dep_info)
             current_dep_map_entry['direct_so_files'].extend(so_files_metadata_list)
             if so_files_metadata_list:
                 all_extracted_so_data_for_json_report.extend(so_files_metadata_list)
         else:
             logging.error(f"Failed to download main artifact for {current_gav_string} from {main_artifact_url}")
-            if artifact_type_to_download != "jar":
+            # Log main artifact download failure, but only if it's not a JAR that will be attempted as fallback
+            # If it IS a jar, and fails, it's the definitive failure for this GAV's artifact.
+            if artifact_type_to_download == "jar":
+                log_failed_download(current_gav_string + f" (ArtifactType: {artifact_type_to_download})")
+
+            if artifact_type_to_download != "jar": # Fallback logic only if original type wasn't JAR
                 logging.info(f"Attempting fallback download with .jar extension for {current_gav_string}")
                 fallback_jar_url = construct_artifact_url(dep_info, repo_url, artifact_type="jar")
                 current_dep_map_entry['artifact_download_url'] += f", FallbackAttemptURL: {fallback_jar_url}"
                 fallback_jar_filename = f"{artifact_id}-{version}.jar"
-                downloaded_fallback_jar_path = download_artifact(fallback_jar_url, temp_dir, fallback_jar_filename)
+                # effective_artifact_download_dir is already defined from the main artifact attempt
+                downloaded_fallback_jar_path = download_artifact(fallback_jar_url, effective_artifact_download_dir, fallback_jar_filename)
                 if downloaded_fallback_jar_path:
                     current_dep_map_entry['downloaded_artifact_path'] = downloaded_fallback_jar_path
                     logging.info(f"Successfully downloaded fallback JAR: {fallback_jar_filename} from {fallback_jar_url}")
@@ -538,6 +737,7 @@ def download_and_extract_dependencies_recursively(
                         all_extracted_so_data_for_json_report.extend(so_files_metadata_list)
                 else:
                     logging.error(f"Fallback JAR download also failed for {current_gav_string} from {fallback_jar_url}")
+                    log_failed_download(current_gav_string + " (Fallback JAR)") # Log fallback JAR download failure
 
 
 def get_repository_url(dependency, google_maven_regex_str):
