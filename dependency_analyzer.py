@@ -16,6 +16,10 @@ python dependency_analyzer.py path/to/your/project/pom.xml path/to/output_report
 
 # For a single Maven dependency:
 python dependency_analyzer.py "com.github.barteksc:pdfium-android:1.9.0" path/to/output_report.json
+
+# Specifying a custom download directory for dependencies:
+python dependency_analyzer.py path/to/your/project/pom.xml path/to/output_report.json --download-dir path/to/your/custom/download_folder
+python dependency_analyzer.py "com.github.barteksc:pdfium-android:1.9.0" path/to/output_report.json --download-dir path/to/your/custom/download_folder
 """
 
 import argparse
