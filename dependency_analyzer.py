@@ -54,12 +54,11 @@ def log_failed_download(gav_string):
     except IOError as e:
         logging.error(f"Could not write to {FAILED_DOWNLOADS_FILE}: {e}")
 
-def parse_maven_file(file_path, skipped_dependencies_eval_list=None):
+def parse_maven_file(file_path): # Removed skipped_dependencies_eval_list from parameters
     """Parses a Maven POM file to extract dependencies."""
     logging.info(f"Parsing Maven file: {file_path}")
     dependencies = []
-    if skipped_dependencies_eval_list is None:
-        skipped_dependencies_eval_list = []
+    locally_skipped_dependencies = [] # Initialize local list
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -75,8 +74,8 @@ def parse_maven_file(file_path, skipped_dependencies_eval_list=None):
             version = version_element.text if version_element is not None else None
 
             if version is not None and '$' in version:
-                logging.warning(f"Skipping dependency {group_id}:{artifact_id}:{version} in POM {file_path} due to evaluated expression in version.")
-                skipped_dependencies_eval_list.append({"groupId": group_id, "artifactId": artifact_id, "version": version, "pom_file": file_path})
+                logging.warning(f"Skipping dependency {group_id}:{artifact_id}:{version} (from POM {file_path}) due to evaluated expression in version.")
+                locally_skipped_dependencies.append({"groupId": group_id, "artifactId": artifact_id, "version": version}) # Append to local list
                 continue
 
             if group_id and artifact_id:
@@ -85,11 +84,11 @@ def parse_maven_file(file_path, skipped_dependencies_eval_list=None):
                 logging.warning(f"Skipping dependency with missing groupId or artifactId in {file_path}")
     except ET.ParseError:
         logging.error(f"Error parsing XML file: {file_path}", exc_info=True)
-        return [], skipped_dependencies_eval_list
+        return [], locally_skipped_dependencies
     except Exception:
         logging.error(f"An unexpected error occurred while parsing {file_path}", exc_info=True)
-        return [], skipped_dependencies_eval_list
-    return dependencies, skipped_dependencies_eval_list
+        return [], locally_skipped_dependencies
+    return dependencies, locally_skipped_dependencies
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze Maven project dependencies for .so file alignment.")
@@ -99,12 +98,15 @@ def main():
     args = parser.parse_args()
 
     initial_dependencies_list = []
-    skipped_dependencies_eval_list = [] # Initialize here for the main POM processing
+    skipped_dependencies_eval_list = [] # This is the global list for aggregation
 
     if os.path.isfile(args.input_source) and args.input_source.lower().endswith("pom.xml"):
         logging.info(f"Input source identified as POM file: {args.input_source}")
-        initial_dependencies_list, skipped_dependencies_eval_list = parse_maven_file(args.input_source, skipped_dependencies_eval_list)
-        if not isinstance(initial_dependencies_list, list): # Should always be a list
+        # parse_maven_file now returns its own local list of skipped dependencies
+        initial_dependencies_list_temp, locally_skipped = parse_maven_file(args.input_source)
+        initial_dependencies_list.extend(initial_dependencies_list_temp)
+        skipped_dependencies_eval_list.extend(locally_skipped) # Aggregate
+        if not isinstance(initial_dependencies_list, list):
             initial_dependencies_list = []
     elif ':' in args.input_source: # Basic check for GAV string
         gav_parts = args.input_source.split(':')
@@ -710,9 +712,11 @@ def download_and_extract_dependencies_recursively(
             except Exception as e_url_extract:
                 logging.error(f"Unexpected error extracting project URL from {downloaded_pom_path}: {e_url_extract}", exc_info=True)
 
-            # Pass skipped_dependencies_eval_list here
-            transitive_deps_from_pom, skipped_dependencies_eval_list = parse_maven_file(downloaded_pom_path, skipped_dependencies_eval_list=skipped_dependencies_eval_list)
-            for trans_dep_info in transitive_deps_from_pom: # This list now only contains valid, non-skipped dependencies
+            # parse_maven_file now returns its own local list of skipped dependencies
+            transitive_deps_from_pom_temp, locally_skipped_transitive = parse_maven_file(downloaded_pom_path)
+            # Aggregate locally_skipped_transitive into the main skipped_dependencies_eval_list
+            skipped_dependencies_eval_list.extend(locally_skipped_transitive)
+            for trans_dep_info in transitive_deps_from_pom_temp: # Process only valid dependencies
                 trans_g = trans_dep_info.get('groupId')
                 trans_a = trans_dep_info.get('artifactId')
                 trans_v = trans_dep_info.get('version')
