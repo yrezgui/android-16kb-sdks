@@ -102,8 +102,13 @@ def main():
         if len(gav_parts) == 3:
             group_id, artifact_id, version = gav_parts[0], gav_parts[1], gav_parts[2]
             if group_id and artifact_id and version:
-                logging.info(f"Input source identified as direct dependency string: {args.input_source}")
-                initial_dependencies_list = [{"groupId": group_id, "artifactId": artifact_id, "version": version}]
+                if '$' in version:
+                    logging.warning(f"Skipping direct dependency {args.input_source} due to evaluated expression in version.")
+                    skipped_dependencies_eval_list.append({"groupId": group_id, "artifactId": artifact_id, "version": version})
+                    # initial_dependencies_list remains empty or unchanged if others were added before
+                else:
+                    logging.info(f"Input source identified as direct dependency string: {args.input_source}")
+                    initial_dependencies_list = [{"groupId": group_id, "artifactId": artifact_id, "version": version}]
             else:
                 logging.error(f"Invalid GAV string format: '{args.input_source}'. Expected 'groupId:artifactId:version' with non-empty parts.")
                 sys.exit(1)
