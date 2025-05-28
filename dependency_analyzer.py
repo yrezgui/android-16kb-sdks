@@ -255,87 +255,147 @@ def generate_yaml_reports(dependency_analysis_map):
             # direct_16kb_compatibility and indirect_16kb_compatibility will be fetched from the full_version_data later
         })
 
-    for (group, artifact), versions_list_minimal in ga_to_versions_map.items():
-        if not versions_list_minimal:
+    for (group, artifact), version_data_list_from_run_minimal in ga_to_versions_map.items():
+        if not version_data_list_from_run_minimal:
             logging.warning(f"No version data found for G:A {group}:{artifact} during YAML generation. Skipping.")
             continue
 
-        # Sort versions first
-        sorted_versions_minimal = sort_versions(versions_list_minimal)
-
-        # Fetch G:A level data using the first version (any version of this G:A would do)
-        # Ensure we use a GAV that definitely exists in dependency_analysis_map
-        first_version_str = sorted_versions_minimal[0]['version']
-        ga_level_gav = f"{group}:{artifact}:{first_version_str}"
-        ga_level_data = dependency_analysis_map.get(ga_level_gav)
-
-        if not ga_level_data:
-            logging.error(f"Could not retrieve G:A level data for {ga_level_gav}. Skipping YAML for this G:A.")
-            continue
-
-        project_url = ga_level_data.get('project_url')
-        maven_repo_name_raw = ga_level_data.get('maven_repository_name')
+        # Determine YAML file path
+        group_path_elements = group.split('.')
+        sanitized_artifact_filename = artifact.replace(':', '_') + ".yml"
+        yaml_file_path_elements = ['_data'] + group_path_elements + [sanitized_artifact_filename]
+        yaml_file_path = os.path.join(*yaml_file_path_elements)
         
-        maven_repository_display = "Other" # Default
-        if maven_repo_name_raw == "Google Maven":
-            maven_repository_display = "Google"
-        elif maven_repo_name_raw == "Maven Central":
-            maven_repository_display = "maven-central"
-        elif maven_repo_name_raw: # If it's some other URL or name
-            maven_repository_display = maven_repo_name_raw
+        # Prepare G:A level data from current run
+        # Fetch using the first version from the minimal list to access dependency_analysis_map
+        first_version_str_for_ga_info = version_data_list_from_run_minimal[0]['version']
+        ga_level_gav_for_info = f"{group}:{artifact}:{first_version_str_for_ga_info}"
+        ga_level_data_from_run = dependency_analysis_map.get(ga_level_gav_for_info)
 
+        if not ga_level_data_from_run:
+            logging.error(f"Could not retrieve G:A level data for {ga_level_gav_for_info} from current run. Skipping YAML for this G:A.")
+            continue
+            
+        dependency_id_current = f"{group}:{artifact}"
+        group_id_current = group
+        artifact_id_current = artifact
+        project_url_current = ga_level_data_from_run.get('project_url')
+        maven_repo_name_raw_current = ga_level_data_from_run.get('maven_repository_name')
+        
+        maven_repository_current = "Other" # Default
+        if maven_repo_name_raw_current == "Google Maven":
+            maven_repository_current = "Google"
+        elif maven_repo_name_raw_current == "Maven Central":
+            maven_repository_current = "maven-central"
+        elif maven_repo_name_raw_current:
+            maven_repository_current = maven_repo_name_raw_current
 
-        processed_versions_data = []
-        for version_info_minimal in sorted_versions_minimal:
+        # Prepare versions_current_run_list (fully populated and sorted)
+        versions_current_run_list = []
+        # Sort the minimal list first to process in order, though final sort happens after merge
+        sorted_versions_minimal_from_run = sort_versions(version_data_list_from_run_minimal)
+
+        for version_info_minimal in sorted_versions_minimal_from_run:
             current_version_str = version_info_minimal['version']
-            gav_string = f"{group}:{artifact}:{current_version_str}"
-            full_version_data = dependency_analysis_map.get(gav_string)
+            gav_string_current_run = f"{group}:{artifact}:{current_version_str}"
+            full_version_data_current_run = dependency_analysis_map.get(gav_string_current_run)
 
-            if not full_version_data:
-                logging.warning(f"Missing full data for {gav_string} in dependency_analysis_map. Skipping this version in YAML.")
+            if not full_version_data_current_run:
+                logging.warning(f"Missing full data for {gav_string_current_run} in dependency_analysis_map (current run). Skipping this version in YAML.")
                 continue
 
-            self_contains_native_code = bool(full_version_data.get('direct_so_files'))
-            
+            self_contains_native_code = bool(full_version_data_current_run.get('direct_so_files'))
             transitive_contains_native_code = False
-            trans_deps_gavs = full_version_data.get('transitive_dependencies', [])
+            trans_deps_gavs = full_version_data_current_run.get('transitive_dependencies', [])
             for trans_gav in trans_deps_gavs:
                 trans_dep_data = dependency_analysis_map.get(trans_gav)
                 if trans_dep_data and trans_dep_data.get('direct_so_files'):
                     transitive_contains_native_code = True
                     break
             
-            version_yaml_entry = {
+            version_yaml_entry_current_run = {
                 'version': current_version_str,
                 'self_contains_native_code': self_contains_native_code,
-                'self_16kb_compatibility': full_version_data.get('direct_16kb_compatibility'),
+                'self_16kb_compatibility': full_version_data_current_run.get('direct_16kb_compatibility'),
                 'transitive_contains_native_code': transitive_contains_native_code,
-                'transitive_16kb_compatibility': full_version_data.get('indirect_16kb_compatibility')
+                'transitive_16kb_compatibility': full_version_data_current_run.get('indirect_16kb_compatibility')
             }
-            processed_versions_data.append(version_yaml_entry)
+            versions_current_run_list.append(version_yaml_entry_current_run)
+        # versions_current_run_list is already sorted by version due to sorted_versions_minimal_from_run
 
-        yaml_data = {
-            'dependency_id': f"{group}:{artifact}",
-            'group_id': group,
-            'artifact_id': artifact,
-            'project_url': project_url,
-            'maven_repository': maven_repository_display,
-            'versions': processed_versions_data
-        }
+        final_yaml_data_to_dump = {}
+        log_action_verb = "Generated" # Default to "Generated" for new files
 
-        group_path_elements = group.split('.')
-        sanitized_artifact_filename = artifact.replace(':', '_') + ".yml"
-        yaml_file_path_elements = ['_data'] + group_path_elements + [sanitized_artifact_filename]
-        yaml_file_path = os.path.join(*yaml_file_path_elements)
+        if os.path.exists(yaml_file_path):
+            logging.info(f"File {yaml_file_path} exists. Attempting merge.")
+            existing_yaml_data = None
+            try:
+                with open(yaml_file_path, 'r') as f:
+                    existing_yaml_data = yaml.safe_load(f)
+                if not isinstance(existing_yaml_data, dict): # Handle empty or malformed file
+                    logging.warning(f"Existing YAML file {yaml_file_path} is malformed or empty. Treating as new file.")
+                    existing_yaml_data = None # Reset to ensure it's treated as a new file scenario
+            except yaml.YAMLError as e_yaml:
+                logging.warning(f"Error loading existing YAML file {yaml_file_path}: {e_yaml}. Treating as new file.")
+                existing_yaml_data = None # Reset
+            except FileNotFoundError: # Should not happen due to os.path.exists, but good practice
+                logging.warning(f"Existing YAML file {yaml_file_path} not found despite os.path.exists. Treating as new file.")
+                existing_yaml_data = None # Reset
+            
+            if existing_yaml_data:
+                # Update top-level fields
+                existing_yaml_data['dependency_id'] = dependency_id_current
+                existing_yaml_data['group_id'] = group_id_current
+                existing_yaml_data['artifact_id'] = artifact_id_current
+                existing_yaml_data['project_url'] = project_url_current
+                existing_yaml_data['maven_repository'] = maven_repository_current
+
+                # Merge versions
+                existing_versions_list = existing_yaml_data.get('versions', [])
+                if not isinstance(existing_versions_list, list): # Ensure it's a list
+                    logging.warning(f"Versions in existing YAML {yaml_file_path} is not a list. Overwriting with current run's versions.")
+                    existing_versions_list = []
+                
+                existing_versions_map = {v['version']: v for v in existing_versions_list}
+
+                for version_entry_current_run in versions_current_run_list:
+                    version_str_current = version_entry_current_run['version']
+                    if version_str_current in existing_versions_map:
+                        # Update existing version entry
+                        existing_versions_map[version_str_current].update(version_entry_current_run)
+                    else:
+                        # Add new version entry
+                        existing_versions_list.append(version_entry_current_run)
+                
+                existing_yaml_data['versions'] = sort_versions(existing_versions_list)
+                final_yaml_data_to_dump = existing_yaml_data
+                log_action_verb = "Updated"
+            else: # Existing file was unreadable or malformed
+                logging.info(f"File {yaml_file_path} was unreadable or malformed. Creating new file.")
+                # Fall through to "else" block logic by not setting final_yaml_data_to_dump here
+                pass # Explicitly do nothing to fall through
+
+        # This block handles both "file does not exist" and "file existed but was unreadable/malformed"
+        if not final_yaml_data_to_dump: # If it's still empty (new file or error loading existing)
+            logging.info(f"File {yaml_file_path} does not exist or was unreadable. Creating new file.")
+            final_yaml_data_to_dump = {
+                'dependency_id': dependency_id_current,
+                'group_id': group_id_current,
+                'artifact_id': artifact_id_current,
+                'project_url': project_url_current,
+                'maven_repository': maven_repository_current,
+                'versions': versions_current_run_list # Already sorted
+            }
+            log_action_verb = "Created"
 
         try:
             yaml_output_dir = os.path.dirname(yaml_file_path)
             os.makedirs(yaml_output_dir, exist_ok=True)
             with open(yaml_file_path, 'w') as f:
-                yaml.dump(yaml_data, f, sort_keys=False, default_flow_style=False, indent=2)
-            logging.info(f"Generated YAML report: {yaml_file_path}")
+                yaml.dump(final_yaml_data_to_dump, f, sort_keys=False, default_flow_style=False, indent=2)
+            logging.info(f"{log_action_verb} YAML report: {yaml_file_path}")
         except Exception as e:
-            logging.error(f"Error generating YAML report {yaml_file_path}: {e}", exc_info=True)
+            logging.error(f"Error writing YAML report {yaml_file_path}: {e}", exc_info=True)
 
 
 def calculate_direct_compatibility(gav_entry):
