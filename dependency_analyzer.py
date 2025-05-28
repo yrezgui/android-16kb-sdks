@@ -661,7 +661,7 @@ def download_and_extract_dependencies_recursively(
                     if trans_gav_string not in processed_gav_strings and not is_in_queue:
                         dependencies_to_process_queue.append(trans_dep_info)
                 else:
-                    logging.warning(f"Skipping transitive dependency with incomplete GAV: {trans_dep_info} from POM {pom_filename}")
+                    logging.warning(f"Skipping transitive dependency with incomplete GAV: {trans_dep_info} from POM {pom_filename_to_use}")
             logging.info(f"Found {len(current_dep_map_entry['transitive_dependencies'])} transitive dependencies for {current_gav_string}")
         else:
             logging.warning(f"Failed to download POM for {current_gav_string} from {pom_url}. Transitive dependencies will not be processed for this specific artifact's POM.")
