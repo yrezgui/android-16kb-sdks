@@ -62,7 +62,9 @@ def parse_maven_file(file_path):
         tree = ET.parse(file_path)
         root = tree.getroot()
         namespace = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
-        for dependency_node in root.findall(f".//{namespace}dependency"):
+        # Find only dependencies that are direct children of the <dependencies> node,
+        # which itself must be a direct child of the <project> (root) node.
+        for dependency_node in root.findall(f"./{namespace}dependencies/{namespace}dependency"):
             group_id_element = dependency_node.find(f"{namespace}groupId")
             artifact_id_element = dependency_node.find(f"{namespace}artifactId")
             version_element = dependency_node.find(f"{namespace}version")
