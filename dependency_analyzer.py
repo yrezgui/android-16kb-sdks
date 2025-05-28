@@ -265,9 +265,10 @@ def generate_yaml_reports(dependency_analysis_map):
             continue
 
         # Determine YAML file path
-        group_path_elements = group.split('.')
-        sanitized_artifact_filename = artifact.replace(':', '_') + ".yml"
-        yaml_file_path_elements = ['_data'] + group_path_elements + [sanitized_artifact_filename]
+        # New filename format: group+artifact.yml
+        new_filename = f"{group}+{artifact}.yml"
+        # New path: libraries/new_filename.yml
+        yaml_file_path_elements = ['libraries', new_filename]
         yaml_file_path = os.path.join(*yaml_file_path_elements)
         
         # Prepare G:A level data from current run
