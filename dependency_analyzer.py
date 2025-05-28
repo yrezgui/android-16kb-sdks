@@ -41,7 +41,18 @@ from packaging.version import parse as parse_version # For robust version sortin
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Hardcoded regex for Google Maven dependencies
-GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*)"
+GOOGLE_MAVEN_DEFAULT_REGEX = "(com\\.google\\.android\\..*|androidx\\..*|com\\.android\\..*)"
+
+FAILED_DOWNLOADS_FILE = "failed_downloads.txt"
+
+def log_failed_download(gav_string):
+    """Appends a GAV string for a failed download to a text file."""
+    try:
+        with open(FAILED_DOWNLOADS_FILE, 'a') as f:
+            f.write(gav_string + '\n')
+        logging.info(f"Logged failed download for {gav_string} to {FAILED_DOWNLOADS_FILE}")
+    except IOError as e:
+        logging.error(f"Could not write to {FAILED_DOWNLOADS_FILE}: {e}")
 
 def parse_maven_file(file_path):
     """Parses a Maven POM file to extract dependencies."""
@@ -584,6 +595,7 @@ def download_and_extract_dependencies_recursively(
             logging.info(f"Found {len(current_dep_map_entry['transitive_dependencies'])} transitive dependencies for {current_gav_string}")
         else:
             logging.warning(f"Failed to download POM for {current_gav_string} from {pom_url}. Transitive dependencies will not be processed for this specific artifact's POM.")
+            log_failed_download(current_gav_string + " (POM)") # Log POM download failure
 
         artifact_type_from_pom = "jar"
         if downloaded_pom_path:
@@ -627,7 +639,12 @@ def download_and_extract_dependencies_recursively(
                 all_extracted_so_data_for_json_report.extend(so_files_metadata_list)
         else:
             logging.error(f"Failed to download main artifact for {current_gav_string} from {main_artifact_url}")
-            if artifact_type_to_download != "jar":
+            # Log main artifact download failure, but only if it's not a JAR that will be attempted as fallback
+            # If it IS a jar, and fails, it's the definitive failure for this GAV's artifact.
+            if artifact_type_to_download == "jar":
+                log_failed_download(current_gav_string + f" (ArtifactType: {artifact_type_to_download})")
+
+            if artifact_type_to_download != "jar": # Fallback logic only if original type wasn't JAR
                 logging.info(f"Attempting fallback download with .jar extension for {current_gav_string}")
                 fallback_jar_url = construct_artifact_url(dep_info, repo_url, artifact_type="jar")
                 current_dep_map_entry['artifact_download_url'] += f", FallbackAttemptURL: {fallback_jar_url}"
@@ -642,6 +659,7 @@ def download_and_extract_dependencies_recursively(
                         all_extracted_so_data_for_json_report.extend(so_files_metadata_list)
                 else:
                     logging.error(f"Fallback JAR download also failed for {current_gav_string} from {fallback_jar_url}")
+                    log_failed_download(current_gav_string + " (Fallback JAR)") # Log fallback JAR download failure
 
 
 def get_repository_url(dependency, google_maven_regex_str):
